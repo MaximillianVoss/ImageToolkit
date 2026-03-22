@@ -7,6 +7,7 @@ namespace ImageToolkit;
 
 internal static class OpenAiApiKeyResolver
 {
+    private const string ApplicationDirectoryName = "ImageToolkit";
     private const string SecretFileName = "openai.secret.json";
     private const string PortableSecretFileName = "openai.portable.secret.json";
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
@@ -105,9 +106,59 @@ internal static class OpenAiApiKeyResolver
         throw new InvalidOperationException($"{baseMessage} Ошибки проверки: {string.Join(" | ", errors)}");
     }
 
+    public static bool TryResolve(out string? apiKey, out string? errorMessage)
+    {
+        try
+        {
+            apiKey = Resolve();
+            errorMessage = null;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            apiKey = null;
+            errorMessage = exception.Message;
+            return false;
+        }
+    }
+
+    public static string SaveForCurrentUser(string apiKey)
+    {
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            throw new ArgumentException("API-ключ не может быть пустым.", nameof(apiKey));
+        }
+
+        var normalizedApiKey = apiKey.Trim();
+        var protectedBytes = ProtectedData.Protect(
+            Encoding.UTF8.GetBytes(normalizedApiKey),
+            null,
+            DataProtectionScope.CurrentUser);
+
+        var secretFile = new OpenAiSecretFile(
+            "dpapi-current-user",
+            Convert.ToBase64String(protectedBytes),
+            DateTime.UtcNow.ToString("O"));
+
+        var secretPath = GetDefaultSecretPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(secretPath) ?? AppContext.BaseDirectory);
+        File.WriteAllText(
+            secretPath,
+            JsonSerializer.Serialize(secretFile, SerializerOptions),
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+        return secretPath;
+    }
+
     private static IEnumerable<string> GetCandidatePaths()
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var defaultSecretPath = GetDefaultSecretPath();
+        if (seen.Add(defaultSecretPath))
+        {
+            yield return defaultSecretPath;
+        }
 
         foreach (var path in EnumerateBasePaths())
         {
@@ -170,6 +221,16 @@ internal static class OpenAiApiKeyResolver
         return string.Concat(
             "E18A3C7D5FB29104",
             "4A6ED8C2139F70B5");
+    }
+
+    private static string GetDefaultSecretPath()
+    {
+        var localApplicationData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var baseDirectory = string.IsNullOrWhiteSpace(localApplicationData)
+            ? AppContext.BaseDirectory
+            : Path.Combine(localApplicationData, ApplicationDirectoryName);
+
+        return Path.Combine(baseDirectory, SecretFileName);
     }
 
     private sealed record OpenAiSecretFile(string Provider, string EncryptedApiKey, string? CreatedAtUtc);

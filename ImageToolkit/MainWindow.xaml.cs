@@ -139,6 +139,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (!EnsureApiKeyConfigured())
+        {
+            StatusTextBlock.Text = "Распознавание отменено: OpenAI API key не задан.";
+            return;
+        }
+
         _isRecognizingObjects = true;
         UpdateUiState();
         StatusTextBlock.Text = "Выполняется распознавание объектов через OpenAI API...";
@@ -164,6 +170,27 @@ public partial class MainWindow : Window
         {
             _isRecognizingObjects = false;
             UpdateUiState();
+        }
+    }
+
+    private void ConfigureApiKeyButton_Click(object sender, RoutedEventArgs e)
+    {
+        var diagnosticMessage = OpenAiApiKeyResolver.TryResolve(out _, out var errorMessage)
+            ? "Найден действующий источник ключа. При сохранении нового значения он заменит локальный зашифрованный файл для этого пользователя."
+            : errorMessage;
+
+        try
+        {
+            if (PromptForApiKey(diagnosticMessage, out var saveMode))
+            {
+                StatusTextBlock.Text = saveMode == ApiKeySaveMode.CurrentUser
+                    ? "OpenAI API key сохранен локально для текущего пользователя."
+                    : "OpenAI API key сохранен только для текущего запуска приложения.";
+            }
+        }
+        catch (Exception exception)
+        {
+            ShowError("Не удалось сохранить OpenAI API key.", exception);
         }
     }
 
@@ -282,6 +309,7 @@ public partial class MainWindow : Window
         ResetButton.IsEnabled = hasImage && canInteract;
         SaveImageButton.IsEnabled = hasImage && canInteract;
         RecognizeObjectsButton.IsEnabled = hasImage && canInteract;
+        ConfigureApiKeyButton.IsEnabled = canInteract;
     }
 
     private ImageOperationDescriptor GetSelectedOperation()
@@ -481,9 +509,63 @@ public partial class MainWindow : Window
         return stream.ToArray();
     }
 
+    private bool EnsureApiKeyConfigured()
+    {
+        if (OpenAiApiKeyResolver.TryResolve(out _, out _))
+        {
+            return true;
+        }
+
+        try
+        {
+            return PromptForApiKey(
+                "OpenAI API key не найден. Введите ключ, чтобы распознавать объекты на изображениях.",
+                out _);
+        }
+        catch (Exception exception)
+        {
+            ShowError("Не удалось сохранить OpenAI API key.", exception);
+            return false;
+        }
+    }
+
+    private bool PromptForApiKey(string? diagnosticMessage, out ApiKeySaveMode saveMode)
+    {
+        saveMode = ApiKeySaveMode.ProcessOnly;
+
+        var dialog = new ApiKeyPromptWindow(diagnosticMessage)
+        {
+            Owner = this
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            return false;
+        }
+
+        var apiKey = dialog.ApiKey;
+        Environment.SetEnvironmentVariable("OPENAI_API_KEY", apiKey);
+
+        if (!dialog.SaveLocally)
+        {
+            saveMode = ApiKeySaveMode.ProcessOnly;
+            return true;
+        }
+
+        OpenAiApiKeyResolver.SaveForCurrentUser(apiKey);
+        saveMode = ApiKeySaveMode.CurrentUser;
+        return true;
+    }
+
     private void ShowError(string title, Exception exception)
     {
         StatusTextBlock.Text = $"{title} {exception.Message}";
         MessageBox.Show(this, exception.Message, title, MessageBoxButton.OK, MessageBoxImage.Error);
+    }
+
+    private enum ApiKeySaveMode
+    {
+        ProcessOnly,
+        CurrentUser
     }
 }
