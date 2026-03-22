@@ -5,3 +5,10 @@
 *.suo
 *.cache
 TestResults/
+openai.secret.json
+**/openai.secret.json
+openai.portable.secret.json
+**/openai.portable.secret.json
+tmp/
+publish-test/
+**/__pycache__/

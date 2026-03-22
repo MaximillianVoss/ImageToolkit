@@ -4,6 +4,12 @@
     <ProjectReference Include="..\ImageToolkit.Core\ImageToolkit.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup Condition="Exists('openai.portable.secret.json')">
+    <Content Include="openai.portable.secret.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>

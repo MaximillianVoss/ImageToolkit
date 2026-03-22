@@ -1,8 +1,11 @@
 using System.IO;
+using System.Text;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using ImageToolkit.Core;
 using Microsoft.Win32;
 
@@ -11,11 +14,18 @@ namespace ImageToolkit;
 public partial class MainWindow : Window
 {
     private readonly ImageProcessor _imageProcessor = new();
+    private readonly OpenAiObjectRecognitionService _objectRecognitionService = new();
     private readonly IReadOnlyList<ImageOperationDescriptor> _operations = ImageOperationsCatalog.All;
+    private static readonly JsonSerializerOptions JsonSerializerOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true
+    };
 
     private ImageFrame? _originalFrame;
     private ImageFrame? _currentFrame;
     private ImageFrame? _previewFrame;
+    private ImageRecognitionResult? _lastRecognitionResult;
+    private bool _isRecognizingObjects;
     private string? _loadedFilePath;
 
     public MainWindow()
@@ -30,6 +40,7 @@ public partial class MainWindow : Window
         UpdateUiState();
         UpdatePlaceholderVisibility();
         UpdateImageDetails();
+        RecognitionResultTextBox.Text = "После распознавания здесь появится отсортированный список объектов и краткое описание сцены.";
         StatusTextBlock.Text = "Откройте изображение, чтобы начать обработку.";
     }
 
@@ -48,17 +59,7 @@ public partial class MainWindow : Window
 
         try
         {
-            var bitmap = LoadBitmap(dialog.FileName);
-            _originalFrame = ConvertToFrame(bitmap);
-            _currentFrame = _originalFrame.Clone();
-            _loadedFilePath = dialog.FileName;
-
-            OriginalImage.Source = ConvertToBitmapSource(_originalFrame);
-            OperationComboBox.SelectedIndex = 0;
-            RefreshPreview();
-            UpdateUiState();
-
-            StatusTextBlock.Text = "Изображение загружено. Выберите операцию и сохраните результат при необходимости.";
+            LoadImageFromPath(dialog.FileName);
         }
         catch (Exception exception)
         {
@@ -127,6 +128,42 @@ public partial class MainWindow : Window
         catch (Exception exception)
         {
             ShowError("Не удалось сохранить изображение.", exception);
+        }
+    }
+
+    private async void RecognizeObjectsButton_Click(object sender, RoutedEventArgs e)
+    {
+        var frameToAnalyze = _previewFrame ?? _currentFrame;
+        if (frameToAnalyze is null || _isRecognizingObjects)
+        {
+            return;
+        }
+
+        _isRecognizingObjects = true;
+        UpdateUiState();
+        StatusTextBlock.Text = "Выполняется распознавание объектов через OpenAI API...";
+
+        try
+        {
+            var pngBytes = EncodeFrameAsPng(frameToAnalyze);
+            var recognitionResult = await _objectRecognitionService.RecognizeAsync(pngBytes, "image/png");
+            _lastRecognitionResult = recognitionResult;
+
+            RecognitionResultTextBox.Text = RecognitionReportFormatter.FormatText(recognitionResult);
+            var savedFilePath = SaveRecognitionResult(recognitionResult);
+
+            StatusTextBlock.Text = savedFilePath is null
+                ? $"Распознавание завершено. Найдено объектов: {recognitionResult.Objects.Count}. Сохранение отменено."
+                : $"Распознавание завершено. Найдено объектов: {recognitionResult.Objects.Count}. Файл сохранен: {savedFilePath}";
+        }
+        catch (Exception exception)
+        {
+            ShowError("Не удалось распознать объекты на изображении.", exception);
+        }
+        finally
+        {
+            _isRecognizingObjects = false;
+            UpdateUiState();
         }
     }
 
@@ -229,18 +266,22 @@ public partial class MainWindow : Window
 
     private void UpdatePlaceholderVisibility()
     {
-        OriginalPlaceholderTextBlock.Visibility = OriginalImage.Source is null ? Visibility.Visible : Visibility.Collapsed;
-        ResultPlaceholderTextBlock.Visibility = ResultImage.Source is null ? Visibility.Visible : Visibility.Collapsed;
+        ViewerPlaceholderTextBlock.Visibility = ResultImage.Source is null ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void UpdateUiState()
     {
         var hasImage = _currentFrame is not null;
         var selectedOperation = GetSelectedOperation();
+        var canInteract = !_isRecognizingObjects;
 
-        ApplyOperationButton.IsEnabled = hasImage && selectedOperation.Type != ImageOperationType.None;
-        ResetButton.IsEnabled = hasImage;
-        SaveImageButton.IsEnabled = hasImage;
+        LoadImageButton.IsEnabled = canInteract;
+        OperationComboBox.IsEnabled = hasImage && canInteract;
+        ParameterSlider.IsEnabled = hasImage && canInteract && selectedOperation.SupportsParameter;
+        ApplyOperationButton.IsEnabled = hasImage && canInteract && selectedOperation.Type != ImageOperationType.None;
+        ResetButton.IsEnabled = hasImage && canInteract;
+        SaveImageButton.IsEnabled = hasImage && canInteract;
+        RecognizeObjectsButton.IsEnabled = hasImage && canInteract;
     }
 
     private ImageOperationDescriptor GetSelectedOperation()
@@ -317,6 +358,127 @@ public partial class MainWindow : Window
             ".bmp" => new BmpBitmapEncoder(),
             _ => new PngBitmapEncoder()
         };
+    }
+
+    public async Task CaptureDocumentationScreenshotsAsync(
+        string sampleImagePath,
+        string initialScreenshotPath,
+        string processedScreenshotPath)
+    {
+        Left = 120;
+        Top = 60;
+        Width = 1360;
+        Height = 840;
+        WindowState = WindowState.Normal;
+        Activate();
+
+        await WaitForUiIdleAsync();
+        SaveWindowScreenshot(initialScreenshotPath);
+
+        LoadImageFromPath(sampleImagePath);
+        var sampleRecognitionResult = new ImageRecognitionResult(
+            "На изображении видны геометрические фигуры и контрастные цветовые области на светлом фоне.",
+            [
+                new RecognizedObject("градиент", 1, "цветной фон"),
+                new RecognizedObject("круг", 1, "контур темно-синего цвета"),
+                new RecognizedObject("прямоугольник", 2, "контрастные геометрические элементы"),
+            ],
+            string.Empty);
+
+        _lastRecognitionResult = sampleRecognitionResult.Normalize();
+        RecognitionResultTextBox.Text = RecognitionReportFormatter.FormatText(_lastRecognitionResult);
+        StatusTextBlock.Text = "Демонстрационный режим: показан пример результата распознавания объектов.";
+
+        await WaitForUiIdleAsync();
+        SaveWindowScreenshot(processedScreenshotPath);
+    }
+
+    private void LoadImageFromPath(string filePath)
+    {
+        var bitmap = LoadBitmap(filePath);
+        _originalFrame = ConvertToFrame(bitmap);
+        _currentFrame = _originalFrame.Clone();
+        _loadedFilePath = filePath;
+        _lastRecognitionResult = null;
+
+        OperationComboBox.SelectedIndex = 0;
+        RefreshPreview();
+        RecognitionResultTextBox.Text = "Изображение загружено. При необходимости нажмите «Распознать объекты».";
+        UpdateUiState();
+
+        StatusTextBlock.Text = "Изображение загружено. Выберите операцию и сохраните результат при необходимости.";
+    }
+
+    private async Task WaitForUiIdleAsync()
+    {
+        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+        UpdateLayout();
+        await Task.Delay(400);
+    }
+
+    private void SaveWindowScreenshot(string filePath)
+    {
+        var bounds = new Rect(RenderSize);
+        var renderTarget = new RenderTargetBitmap(
+            (int)Math.Max(1, bounds.Width),
+            (int)Math.Max(1, bounds.Height),
+            96,
+            96,
+            PixelFormats.Pbgra32);
+
+        renderTarget.Render(this);
+
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(renderTarget));
+
+        Directory.CreateDirectory(Path.GetDirectoryName(filePath) ?? ".");
+        using var stream = File.Create(filePath);
+        encoder.Save(stream);
+    }
+
+    private string? SaveRecognitionResult(ImageRecognitionResult result)
+    {
+        var dialog = new SaveFileDialog
+        {
+            Title = "Сохранить распознанные объекты",
+            FileName = BuildDefaultRecognitionFileName(),
+            Filter = "Текстовый отчет (*.txt)|*.txt|JSON (*.json)|*.json"
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return null;
+        }
+
+        var normalized = result.Normalize();
+        var extension = Path.GetExtension(dialog.FileName).ToLowerInvariant();
+        var content = extension == ".json"
+            ? JsonSerializer.Serialize(normalized, JsonSerializerOptions)
+            : RecognitionReportFormatter.FormatText(normalized);
+
+        File.WriteAllText(dialog.FileName, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        return dialog.FileName;
+    }
+
+    private string BuildDefaultRecognitionFileName()
+    {
+        if (string.IsNullOrWhiteSpace(_loadedFilePath))
+        {
+            return "recognized-objects.txt";
+        }
+
+        return $"{Path.GetFileNameWithoutExtension(_loadedFilePath)}-objects.txt";
+    }
+
+    private static byte[] EncodeFrameAsPng(ImageFrame frame)
+    {
+        var bitmap = ConvertToBitmapSource(frame);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+
+        using var stream = new MemoryStream();
+        encoder.Save(stream);
+        return stream.ToArray();
     }
 
     private void ShowError(string title, Exception exception)

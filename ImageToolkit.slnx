@@ -1,5 +1,4 @@
 <Solution>
-  <Project Path="ImageToolkit.Core.Tests/ImageToolkit.Core.Tests.csproj" />
   <Project Path="ImageToolkit.Core/ImageToolkit.Core.csproj" />
   <Project Path="ImageToolkit/ImageToolkit.csproj" />
 </Solution>
